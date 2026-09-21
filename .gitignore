@@ -1,0 +1,14 @@
+# 实时凭证 —— 绝不入库（cannbot-creds.sh 现已默认写到 ~/.local/share/cannbot-gateway-proxy/）
+creds.json
+vk-cache.json
+
+# 运行时产物
+proxy.log
+proxy.log.1
+stats.json
+logs/
+*.bak
+*.bak-cannbot
+
+# 系统文件
+.DS_Store
