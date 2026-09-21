@@ -796,11 +796,15 @@ const server = http.createServer(async (req, res) => {
       const models = Object.entries(today.models)
         .map(([id, b]) => ({ id, ...b }))
         .sort((a, b) => b.req - a.req);
+      // 完整逐日数据（含每天的分模型用量），供管理台做今日/近7天/近30天区间汇总与每日趋势图
+      const days = Object.keys(stats.days).sort()
+        .map((date) => ({ date, total: stats.days[date].total, models: stats.days[date].models }));
       return sendJson(res, 200, {
         today: today.total,
         week: summarizeStats(weekKeys),
         models,
         hours: today.hours,
+        days,
         since: weekKeys[0] ?? null,
       });
     }

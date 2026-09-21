@@ -46,11 +46,11 @@ https://cannbot.hicann.cn/gateway/compatible-mode/v1/chat/completions   (CANNBot
 日常管理都在网页管理台完成（每 3 秒自动刷新）：
 
 - 服务状态、JWT 剩余时间倒计时、VK 缓存、模型列表（点击填入测试）
-- **流量统计**：今日请求/错误/输入输出 tokens、近 7 天累计、24 小时分布柱状图、分模型用量表（tokens 为上游报告值；数据持久化在运行时目录 `stats.json`，保留近 30 天，卸载即清零）
+- **流量统计**：今日 / 近 7 天 / 近 30 天三个区间切换（参考 cc-switch 用量页）——区间汇总卡片（请求/错误/输入输出 tokens/平均耗时）、趋势柱状图（今日按小时、多天按日）、分模型区间汇总表（tokens 为上游报告值；数据持久化在运行时目录 `stats.json`，保留近 30 天，卸载即清零；深链 `/#stats-7`、`/#stats-30` 可直达对应区间）
 - 一键**发送测试请求**验证链路；日志实时滚动（错误红色高亮）
 - **重启服务 / 停止服务**按钮（停止后双击 .command 或 `./install.sh` 再启）
 
-统计亦可程序化读取：`GET /admin/stats`（返回 today/week/models/hours）。
+统计亦可程序化读取：`GET /admin/stats`（返回 today/week/models/hours，另含 `days` 逐日数组——每天 `{date, total, models}`，共近 30 天）。
 
 命令行方式等价可用：
 

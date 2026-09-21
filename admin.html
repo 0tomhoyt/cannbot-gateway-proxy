@@ -5,52 +5,74 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CANNBot 网关代理 · 管理台</title>
 <style>
+  /* Claude 风格：暖奶油底、陶土橙强调、衬线标题、药丸按钮 */
   :root {
-    --bg: #f5f6f8; --card: #ffffff; --ink: #1a1d21; --dim: #6b7280;
-    --line: #e5e7eb; --green: #16a34a; --red: #dc2626; --yellow: #d97706;
-    --blue: #2563eb; --chip: #eef2f7;
+    --bg: #faf9f5; --card: #ffffff; --ink: #2d2a21; --dim: #8c897b;
+    --line: #e8e6dd; --chip: #f2f0e9;
+    --accent: #d97757; --accent-hover: #c25e3d; --accent-soft: #f7e8e1;
+    --green: #6c8a53; --red: #bf4d43; --yellow: #c08a3e;
+    --shadow: 0 1px 2px rgba(45,42,33,.04), 0 4px 14px rgba(45,42,33,.04);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1115; --card: #171a21; --ink: #e6e8eb; --dim: #9aa1ad;
-      --line: #262b36; --green: #4ade80; --red: #f87171; --yellow: #fbbf24;
-      --blue: #60a5fa; --chip: #20252f;
+      --bg: #262624; --card: #30302e; --ink: #f0eee6; --dim: #a8a494;
+      --line: #403f39; --chip: #3a3934;
+      --accent: #e08b6d; --accent-hover: #eba489; --accent-soft: #4a382f;
+      --green: #9dba7f; --red: #e58e83; --yellow: #dcae6c;
+      --shadow: 0 1px 2px rgba(0,0,0,.2), 0 4px 14px rgba(0,0,0,.15);
     }
   }
   * { box-sizing: border-box; margin: 0; }
   body {
     font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
-    background: var(--bg); color: var(--ink); padding: 24px; max-width: 880px; margin: 0 auto;
+    background: var(--bg); color: var(--ink); padding: 28px 24px 40px; max-width: 880px; margin: 0 auto;
   }
-  h1 { font-size: 20px; display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+  h1 {
+    font-family: ui-serif, Georgia, "Songti SC", "STSong", serif;
+    font-size: 22px; font-weight: 600; letter-spacing: .01em;
+    display: flex; align-items: center; gap: 10px; margin-bottom: 4px;
+  }
+  .subtitle { font-size: 12.5px; color: var(--dim); margin-bottom: 18px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); flex: none; }
   .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
   .dot.bad { background: var(--red); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
-  .card h2 { font-size: 12px; color: var(--dim); font-weight: 600; letter-spacing: .05em; margin-bottom: 8px; }
-  .kv { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px; box-shadow: var(--shadow);
+  }
+  .card h2 {
+    font-family: ui-serif, Georgia, "Songti SC", "STSong", serif;
+    font-size: 12px; color: var(--dim); font-weight: 600; letter-spacing: .08em; margin-bottom: 10px;
+  }
+  .kv { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
   .kv .k { color: var(--dim); }
   .ok { color: var(--green); } .bad { color: var(--red); } .warn { color: var(--yellow); } .dim { color: var(--dim); }
-  .banner { border-radius: 10px; padding: 12px 16px; margin: 12px 0; font-size: 13px; line-height: 1.6; display: none; }
-  .banner.red { background: color-mix(in srgb, var(--red) 12%, var(--card)); border: 1px solid var(--red); }
-  .banner.blue { background: color-mix(in srgb, var(--blue) 10%, var(--card)); border: 1px solid var(--blue); }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+  .banner { border-radius: 12px; padding: 12px 16px; margin: 12px 0; font-size: 13px; line-height: 1.6; display: none; }
+  .banner.red { background: var(--accent-soft); border: 1px solid var(--red); }
+  .banner.blue { background: var(--chip); border: 1px solid var(--accent); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; align-items: center; }
   button {
-    font: inherit; font-size: 13px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    font: inherit; font-size: 13px; padding: 8px 16px; border-radius: 999px; cursor: pointer;
     border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    transition: border-color .15s, background .15s, color .15s;
   }
-  button:hover { border-color: var(--blue); }
-  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button:hover { border-color: var(--accent); color: var(--accent-hover); }
+  button.primary { background: var(--ink); border-color: var(--ink); color: var(--bg); font-weight: 500; }
+  button.primary:hover { opacity: .88; color: var(--bg); }
   button.danger:hover { border-color: var(--red); color: var(--red); }
   button:disabled { opacity: .5; cursor: default; }
-  select { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  select {
+    font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  }
+  select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #result { font-size: 13px; white-space: pre-wrap; word-break: break-all; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-  .chip { background: var(--chip); border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
-  .chip:hover { outline: 1px solid var(--blue); }
-  .statrow { display: flex; gap: 22px; flex-wrap: wrap; margin: 4px 0 10px; }
-  .stat .num { font-size: 20px; font-weight: 700; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+  .chip:hover { outline: 1.5px solid var(--accent); color: var(--accent-hover); }
+  .statrow { display: flex; gap: 26px; flex-wrap: wrap; margin: 4px 0 12px; }
+  .stat .num { font-size: 22px; font-weight: 700; font-family: ui-serif, Georgia, serif; }
   .stat .lbl { font-size: 11px; color: var(--dim); margin-top: 2px; }
   .chartwrap { margin: 10px 0 12px; }
   .chartrow { display: flex; gap: 8px; }
@@ -61,25 +83,33 @@
   .plot { position: relative; flex: 1; height: 76px; border-bottom: 1px solid var(--line); }
   .plot .gl { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--line); pointer-events: none; }
   .chart { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 2px; }
-  .chart .bar { flex: 1; background: var(--blue); opacity: .7; border-radius: 2px 2px 0 0; min-height: 3px; }
+  .chart .bar { flex: 1; background: var(--accent); opacity: .75; border-radius: 3px 3px 0 0; min-height: 3px; }
   .chart .bar.zero { background: var(--line); opacity: 1; min-height: 2px; }
   .chart .bar.now { opacity: 1; outline: 1.5px solid var(--ink); }
   .xaxis { display: flex; margin-left: 44px; margin-top: 4px; font-size: 10px; color: var(--dim); }
   .xaxis span { flex: 1; text-align: center; line-height: 1; }
   .xaxis span.now { color: var(--ink); font-weight: 600; }
   .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  .tbl th { text-align: left; color: var(--dim); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--line); }
-  .tbl td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  .tbl th { text-align: left; color: var(--dim); font-weight: 600; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+  .tbl td { padding: 5px 6px; border-bottom: 1px solid var(--line); }
+  /* 统计范围切换（今日/近7天/近30天），参考 cc-switch 的 range presets */
+  .seg { display: inline-flex; background: var(--chip); border-radius: 999px; padding: 3px; gap: 2px; font-family: -apple-system, "PingFang SC", sans-serif; }
+  .seg button { border: none; background: transparent; padding: 4px 12px; font-size: 12px; border-radius: 999px; color: var(--dim); }
+  .seg button:hover { color: var(--ink); border-color: transparent; }
+  .seg button.active { background: var(--ink); color: var(--bg); }
+  .seg button.active:hover { color: var(--bg); }
   pre#log {
-    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-    padding: 12px 14px; font: 11.5px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
-    max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 16px; font: 11.5px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; box-shadow: var(--shadow);
   }
-  .foot { margin-top: 14px; font-size: 12px; color: var(--dim); text-align: center; }
+  .foot { margin-top: 16px; font-size: 12px; color: var(--dim); text-align: center; }
+  code { background: var(--chip); border-radius: 5px; padding: 1px 5px; font-size: .92em; }
 </style>
 </head>
 <body>
 <h1><span class="dot" id="dot"></span>CANNBot 网关代理 · 管理台</h1>
+<div class="subtitle">OpenAI 兼容透传 + Anthropic Messages 翻译 · 每次请求自动注入最新凭证</div>
 
 <div class="banner red" id="jwtBanner">
   <b>JWT 已过期 / 不可用</b> —— 打开 VSCode 的 <b>CANNWork 扩展</b>重新登录即可，无需重启代理，页面会在几秒内自动恢复。
@@ -103,20 +133,28 @@
   </div>
 </div>
 
-<div class="card" style="margin-top:12px">
+<div class="card" style="margin-top:14px">
   <h2>模型（点击填入测试）</h2>
   <div class="chips" id="models"><span class="dim">加载中…</span></div>
 </div>
 
-<div class="card" style="margin-top:12px">
-  <h2>流量统计</h2>
+<div class="card" style="margin-top:14px">
+  <h2 style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+    <span>流量统计</span>
+    <span class="seg" id="rangeSeg">
+      <button data-range="today" class="active">今日</button>
+      <button data-range="7">近7天</button>
+      <button data-range="30">近30天</button>
+    </span>
+  </h2>
   <div class="statrow">
-    <div class="stat"><div class="num" id="tReq">–</div><div class="lbl">今日请求</div></div>
-    <div class="stat"><div class="num" id="tErr">–</div><div class="lbl">今日错误</div></div>
-    <div class="stat"><div class="num" id="tIn">–</div><div class="lbl">今日输入 tok</div></div>
-    <div class="stat"><div class="num" id="tOut">–</div><div class="lbl">今日输出 tok</div></div>
-    <div class="stat"><div class="num" id="tWeek">–</div><div class="lbl">近7天请求</div></div>
+    <div class="stat"><div class="num" id="tReq">–</div><div class="lbl">请求数</div></div>
+    <div class="stat"><div class="num" id="tErr">–</div><div class="lbl">错误</div></div>
+    <div class="stat"><div class="num" id="tIn">–</div><div class="lbl">输入 tok</div></div>
+    <div class="stat"><div class="num" id="tOut">–</div><div class="lbl">输出 tok</div></div>
+    <div class="stat"><div class="num" id="tAvg">–</div><div class="lbl">平均耗时</div></div>
   </div>
+  <div class="dim" id="chartCaption" style="font-size:11px;margin:0 0 6px;min-height:13px"></div>
   <div class="chartwrap">
     <div class="chartrow">
       <div class="yaxis"><span id="yMax">–</span><span id="yMid"></span><span>0</span></div>
@@ -129,7 +167,7 @@
     <div class="xaxis" id="xaxis"></div>
   </div>
   <table class="tbl" id="mtbl"></table>
-  <div class="dim" style="font-size:11px;margin-top:6px">tokens 为上游报告值，未上报 usage 的流式调用计 0；统计持久化在运行时目录，卸载代理即清零。</div>
+  <div class="dim" style="font-size:11px;margin-top:6px">tokens 为上游报告值，未上报 usage 的流式调用计 0；统计持久化在运行时目录，保留近 30 天，卸载代理即清零。</div>
 </div>
 
 <div class="actions">
@@ -179,7 +217,7 @@ async function loadModels() {
     const d = await jf('/v1/models');
     models = d.data || [];
     $('models').innerHTML = models.map(m =>
-      `<span class="chip" onclick="pick('${m.id}')">${m.id}</span>`).join('');
+      `<span class="chip" onclick="pick('${m.id}')" title="${(m.title || '').replace(/"/g,'&quot;')}">${m.id}</span>`).join('');
     const sel = $('model');
     sel.innerHTML = models.map(m => `<option>${m.id}</option>`).join('');
     if (models.some(m => m.id === 'glm-5.3-flash')) sel.value = 'glm-5.3-flash';
@@ -210,42 +248,102 @@ async function poll() {
 
 const fmtTok = (n) => n == null ? '–' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e4 ? (n/1e3).toFixed(1)+'k' : String(n);
 
-function renderStats(s) {
-  $('tReq').textContent = fmtTok(s.today.req);
-  $('tErr').textContent = s.today.err ? `${s.today.err}` : '0';
-  $('tErr').className = s.today.err ? 'num bad' : 'num';
-  $('tIn').textContent = fmtTok(s.today.tin);
-  $('tOut').textContent = fmtTok(s.today.tout);
-  $('tWeek').textContent = fmtTok(s.week.req);
-  const hours = Array.isArray(s.hours) && s.hours.length === 24
-    ? s.hours : Array.from({length:24}, () => ({req:0, tin:0, tout:0}));
-  const max = Math.max(1, ...hours.map(h => h.req));
-  const niceCeil = (v) => {
-    const k = Math.pow(10, Math.floor(Math.log10(v)));
-    for (const m of [1, 2, 5, 10]) { if (v <= m * k) return m * k; }
-    return 10 * k;
-  };
-  const ymax = niceCeil(max);
+// ---- 流量统计：今日/近7天/近30天区间切换（参考 cc-switch 用量页） ----------
+let statRange = 'today';
+let lastStats = null;
+
+const emptyB = () => ({ req: 0, err: 0, tin: 0, tout: 0, ms: 0 });
+const addB = (a, b) => { a.req += b.req || 0; a.err += b.err || 0; a.tin += b.tin || 0; a.tout += b.tout || 0; a.ms += b.ms || 0; return a; };
+const dayKeyOff = (off) => {
+  const d = new Date(); d.setDate(d.getDate() - off);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+const dayShort = (k) => { const [, m, d] = k.split('-'); return `${+m}/${+d}`; };
+
+// 选中区间的汇总 + 每日序列（缺失日期补零）+ 分模型聚合
+function rangeData(s) {
+  if (statRange === 'today') return { totals: s.today || emptyB(), models: s.models || [], seq: null };
+  const n = statRange === '7' ? 7 : 30;
+  const byDate = new Map((s.days || []).map((d) => [d.date, d]));
+  const seq = [];
+  for (let i = n - 1; i >= 0; i--) { const date = dayKeyOff(i); seq.push({ date, d: byDate.get(date) }); }
+  const totals = seq.reduce((a, x) => (x.d ? addB(a, x.d.total || emptyB()) : a), emptyB());
+  const merged = {};
+  for (const x of seq) {
+    if (!x.d || !x.d.models) continue;
+    for (const [id, b] of Object.entries(x.d.models)) addB(merged[id] ??= emptyB(), b);
+  }
+  const models = Object.entries(merged).map(([id, b]) => ({ id, ...b })).sort((a, b) => b.req - a.req);
+  return { totals, models, seq };
+}
+
+function niceCeil(v) {
+  const k = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 5, 10]) { if (v <= m * k) return m * k; }
+  return 10 * k;
+}
+
+function drawStats() {
+  const s = lastStats;
+  if (!s) return;
+  const { totals, models, seq } = rangeData(s);
+
+  $('tReq').textContent = fmtTok(totals.req);
+  $('tErr').textContent = String(totals.err || 0);
+  $('tErr').className = totals.err ? 'num bad' : 'num';
+  $('tIn').textContent = fmtTok(totals.tin);
+  $('tOut').textContent = fmtTok(totals.tout);
+  $('tAvg').textContent = totals.req ? Math.round(totals.ms / totals.req) + 'ms' : '–';
+
+  const nowH = new Date().getHours();
+  let bars, xlabels, ymaxSrc, caption = '';
+  if (seq) {
+    bars = seq.map((x) => ({ req: x.d?.total?.req || 0, tin: x.d?.total?.tin || 0, tout: x.d?.total?.tout || 0, label: dayShort(x.date), tip: dayShort(x.date), isNow: x.date === dayKeyOff(0) }));
+    const step = Math.ceil(bars.length / 6);
+    xlabels = bars.map((b, i) => ({ text: i % step === 0 || i === bars.length - 1 ? b.label : '', now: b.isNow }));
+    ymaxSrc = bars.map((b) => b.req);
+    caption = `每日请求 · ${dayShort(seq[0].date)} – ${dayShort(seq[seq.length - 1].date)}`;
+  } else {
+    const hours = Array.isArray(s.hours) && s.hours.length === 24
+      ? s.hours : Array.from({ length: 24 }, () => ({ req: 0, tin: 0, tout: 0 }));
+    bars = hours.map((h, i) => ({ req: h.req, tin: h.tin, tout: h.tout, label: String(i), tip: `${i}:00`, isNow: i === nowH }));
+    xlabels = bars.map((b, i) => ({ text: i % 3 === 0 ? b.label : '', now: b.isNow }));
+    ymaxSrc = bars.map((b) => b.req);
+    caption = '今日按小时分布';
+  }
+
+  const ymax = niceCeil(Math.max(1, ...ymaxSrc));
   $('yMax').textContent = fmtTok(ymax);
   $('yMid').textContent = fmtTok(ymax / 2);
-  const nowH = new Date().getHours();
-  $('chart').innerHTML = hours.map((h, i) => {
-    const ht = Math.min(100, Math.max(Math.round(h.req / ymax * 100), h.req ? 4 : 0));
-    return `<div class="bar${i === nowH ? ' now' : ''}${h.req ? '' : ' zero'}" style="height:${ht}%" ` +
-      `title="${i}:00 — ${h.req} 次 / 入 ${fmtTok(h.tin)} / 出 ${fmtTok(h.tout)} tok"></div>`;
+  $('chartCaption').textContent = caption;
+  $('chart').innerHTML = bars.map((b) => {
+    const ht = Math.min(100, Math.max(Math.round(b.req / ymax * 100), b.req ? 4 : 0));
+    return `<div class="bar${b.isNow ? ' now' : ''}${b.req ? '' : ' zero'}" style="height:${ht}%" ` +
+      `title="${b.tip} — ${b.req} 次 / 入 ${fmtTok(b.tin)} / 出 ${fmtTok(b.tout)} tok"></div>`;
   }).join('');
-  $('xaxis').innerHTML = hours.map((_, i) =>
-    `<span class="${i === nowH ? 'now' : ''}">${i % 3 === 0 ? i : ''}</span>`).join('');
-  const rows = s.models || [];
+  $('xaxis').innerHTML = xlabels.map((x) =>
+    `<span class="${x.now ? 'now' : ''}">${x.text}</span>`).join('');
+
   $('mtbl').innerHTML =
     '<tr><th>模型</th><th>请求</th><th>错误</th><th>输入 tok</th><th>输出 tok</th><th>平均耗时</th></tr>' +
-    (rows.length ? rows.map(m =>
+    (models.length ? models.map((m) =>
       `<tr><td>${m.id}</td><td>${m.req}</td>` +
       `<td class="${m.err ? 'bad' : 'dim'}">${m.err || '0'}</td>` +
       `<td>${fmtTok(m.tin)}</td><td>${fmtTok(m.tout)}</td>` +
       `<td class="dim">${m.req ? Math.round(m.ms / m.req) + 'ms' : '–'}</td></tr>`
-    ).join('') : '<tr><td colspan="6" class="dim">今天还没有模型流量</td></tr>');
+    ).join('') : '<tr><td colspan="6" class="dim">所选区间还没有模型流量</td></tr>');
 }
+
+document.querySelectorAll('#rangeSeg button').forEach((b) => {
+  b.onclick = () => {
+    statRange = b.dataset.range;
+    document.querySelectorAll('#rangeSeg button').forEach((x) => x.classList.toggle('active', x === b));
+    drawStats();
+  };
+});
+
+function renderStats(s) { lastStats = s; drawStats(); }
 
 $('btnTest').onclick = async () => {
   const model = $('model').value;
@@ -284,6 +382,12 @@ $('btnStop').onclick = async () => {
 loadModels();
 poll();
 setInterval(poll, 3000);
+// 深链：/#stats-7、/#stats-30 直接落到对应统计区间
+const statHash = location.hash.match(/^#stats-(7|30)$/);
+if (statHash) {
+  statRange = statHash[1];
+  document.querySelectorAll('#rangeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.range === statRange));
+}
 </script>
 </body>
 </html>
