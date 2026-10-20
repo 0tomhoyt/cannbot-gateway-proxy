@@ -46,11 +46,18 @@ https://cannbot.hicann.cn/gateway/compatible-mode/v1/chat/completions   (CANNBot
 日常管理都在网页管理台完成（每 3 秒自动刷新）：
 
 - 服务状态、JWT 剩余时间倒计时、VK 缓存、模型列表（点击填入测试）
-- **流量统计**：今日 / 近 7 天 / 近 30 天三个区间切换（参考 cc-switch 用量页）——区间汇总卡片（请求/错误/输入输出 tokens/平均耗时）、趋势柱状图（今日按小时、多天按日）、分模型区间汇总表（tokens 为上游报告值；数据持久化在运行时目录 `stats.json`，保留近 30 天，卸载即清零；深链 `/#stats-7`、`/#stats-30` 可直达对应区间）
+- **流量统计**：今日 / 近 7 天 / 近 30 天三个区间切换（参考 cc-switch 用量页）——区间汇总卡片（请求/错误/输入输出 tokens/平均耗时）、趋势柱状图（今日按小时、多天按日）、分模型用量表。tokens 为上游报告值；数据持久化在运行时目录 `stats.json`，保留近 30 天，卸载即清零；深链 `/#stats-7`、`/#stats-30` 可直达对应区间
+- **模型性能**（与流量统计同一区间，只统计流式响应）：口径对齐 vLLM benchmark / MLPerf。
+  - **TTFT**：发出上游请求到首个输出块（不含本地换 VK）
+  - **TPOT**：解码段 ÷（输出 token − 首包 token）。解码段从首块到末块；逐 token 流式时首包 = 1，即 vLLM 的 `(n−1)`。首包含多个 token 时，按字符权重把上游 `completion_tokens` 摊到各块（CJK 约 1 字 1 token，其余约 4 字 1 token）
+  - **ITL**：相邻输出块的间隔 ÷ 该块 token 数，每个 token 记一次
+  - **E2E**：发出上游请求到流结束
+  - **解码速度**：Σ 解码 token / Σ 解码时间，按 token 加权
+  - 中位与 P99 来自延迟直方图（`perf.ttft/tpot/itl/e2e` 的 `n`/`sum`/`b`）。OpenAI 流式 `chat/completions` 会自动补 `stream_options.include_usage`
 - 一键**发送测试请求**验证链路；日志实时滚动（错误红色高亮）
 - **重启服务 / 停止服务**按钮（停止后双击 .command 或 `./install.sh` 再启）
 
-统计亦可程序化读取：`GET /admin/stats`（返回 today/week/models/hours，另含 `days` 逐日数组——每天 `{date, total, models}`，共近 30 天）。
+统计亦可程序化读取：`GET /admin/stats`（返回 today/week/models/hours，另含 `days` 逐日数组——每天 `{date, total, models}`，共近 30 天，以及 `latEdges` 延迟直方图上界，单位毫秒）。有流式样本的汇总桶带 `perf`：`ttft`/`tpot`/`e2e` 为 `{n, sum, b, s}`（`s` 是原始样本，用于精确中位数和 P99；样本多时退回直方图 `b`），`itl` 只有直方图。`dtok`/`dms`/`dn` 用于解码速度 = `dtok / (dms / 1000)`。
 
 命令行方式等价可用：
 
@@ -77,7 +84,7 @@ cd ~/Desktop/cannbot-gateway-proxy
 | 场景 | 你需要做的 |
 |---|---|
 | **JWT 过期**（每 24h） | 打开 VSCode 的 CANNWork 扩展**重新登录**即可。代理每次请求都从 `session.json` 现读最新 JWT，登录后无需重启代理、无需改任何配置。过期后代理返回带指引的 502（`jwt_expired`），照做即可。 |
-| **VK 失效/更换账号** | 无需操作。代理启动后自动换取 VK 并缓存（`vk-cache.json`）；上游 401 时自动重取并重试一次（403「Model not allowed」是账号权限问题，不重试，直接透传）。 |
+| **VK 失效/更换账号** | 无需操作。VK 获取链路（与 CANNWork 2.0.2+ 同源）：`auth.json`（扩展登录时写入）→ `/cannbot/api/ai-keys/vk/my`（JWT 换取，权威来源）→ 遗留接口 `/cannbot/api/models/personal` 兜底；成功后缓存 `vk-cache.json`。上游 401 时跳过缓存从权威来源重取并重试一次（403「Model not allowed」是账号权限问题，不重试，直接透传）。 |
 | **不确定凭证状态** | `./status.sh` 看 `jwt.expiresAt`（过期时间）与 `ok` 字段；或跑 `./cannbot-creds.sh` 做一次完整校验。 |
 
 ## 使用方式（本地 agent 接入）
@@ -87,9 +94,8 @@ cd ~/Desktop/cannbot-gateway-proxy
 ```
 Base URL : http://127.0.0.1:8484/v1
 API Key  : 任意非空字符串（本地服务不校验）
-模型列表 : GET /v1/models （当前 9 个：glm-5.3 / glm-5.3-flash / deepseek-v4-pro / deepseek-v4-flash /
-           claude-opus-4-8 / gpt-5.4 / qwen3.8-max / qwen3.8-flash / kimi-k3；
-           注意 kimi-k3 账号实际无调用权限，请求会报 "Model not allowed"）
+模型列表 : GET /v1/models （当前 7 个：glm-5.3 / glm-5.3-flash / deepseek-v4-pro / deepseek-v4-flash /
+           deepseek-v4.1-flash / qwen3.8-max / qwen3.8-flash，2026-10-20 与上游校准）
 ```
 
 curl 示例：
@@ -134,9 +140,9 @@ curl http://127.0.0.1:8484/v1/messages \
 }
 ```
 
-**⚠️ 模型别名必须映射到实测可用的模型**。截至 2026-09-20，账号真正能调通的只有 6 个：
-`glm-5.3`、`glm-5.3-flash`、`deepseek-v4-pro`、`deepseek-v4-flash`、`qwen3.8-max`、`qwen3.8-flash`；
-`claude-opus-4-8`、`gpt-5.4`、`kimi-k3` 虽在网关模型列表里，但实际请求返回 403 "Model not allowed"（账号无权限，与代理无关）。
+**⚠️ 模型别名必须映射到实测可用的模型**。截至 2026-10-20，上游网关共 7 个模型且全部实测可调：
+`glm-5.3`、`glm-5.3-flash`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-v4.1-flash`、`qwen3.8-max`、`qwen3.8-flash`；
+此前列表中的 `claude-opus-4-8`、`gpt-5.4`、`kimi-k3` 已从网关下线（2026-09 时就因账号无权限返回 403，现已不再返回）。
 
 翻译层支持：`system`（字符串/块数组）、文本与 base64/url 图片、`tools`+`tool_choice`（auto/any/none/tool）、
 `tool_use`/`tool_result` 多轮闭环、`stop_sequences`、`temperature`/`top_p`、流式（message_start → content_block_* → message_delta(stop_reason+usage) → message_stop 完整事件序列）；
@@ -162,7 +168,7 @@ tail -50 logs/proxy.err.log         # 崩溃/启动失败先看这里（运行�
 |---|---|
 | 请求返回 502 `jwt_expired` / `jwt_missing` | CANNWork 扩展未登录或 JWT 过期 → 重新登录即可 |
 | 连接拒绝（ECONNREFUSED） | 代理没在运行 → `./install.sh`；或换过端口，客户端 URL 没跟着改 |
-| 上游 403 "Model not allowed" | 账号本身无该模型权限（如 kimi-k3），与代理无关 |
+| 上游 403 "Model not allowed" | 账号本身无该模型权限（VK 白名单限制），与代理无关 |
 | 端口被占 | `./install.sh 8485` 换端口，客户端 URL 同步改 |
 | 改了 `server.mjs` 不生效 | 重跑 `./install.sh`（launchd 跑的是运行时副本，改源文件需重新拷贝） |
 
@@ -186,6 +192,8 @@ rm -rf ~/Desktop/cannbot-gateway-proxy
 2. `~/.zcode/cli/config.json` —— `provider.cannbot` → 本地代理
 
 ## 已知注意事项
+
+- **CANNWork 2.0.2（2026-10-14）已适配**：扩展把模型列表切到了 `/cannbot/api/models/list`、VK 改存 `~/.local/share/opencode/auth.json`（登录时经 `/cannbot/api/ai-keys/vk/my` 写入）。代理已同步该链路：模型列表官方接口优先、遗留 `/models/personal` 兜底；VK 按 auth.json → ai-keys 接口 → 遗留接口的顺序获取，`/healthz` 的 `vkSource`/`vkQuota` 可查当前来源与配额。管理台「凭证」卡片同步展示。
 
 - ZCode.app 在 UI 里改动 provider 时可能重写 `provider_config.json`，把 `glm` 的 baseUrl 改回 bigmodel。发现 zcode 又报"余额不足"时，先 `./status.sh` 看代理是否正常，再用本目录 `cannbot-creds.sh --sync-zcode` 之外的方法检查：`grep -o '127.0.0.1:8484' ~/.zcode/v2/provider_config.json`（无输出即被改回，重跑改接或参考进度报告）。
 - 原理备忘：zcode CLI 0.16.9 忽略配置文件里的 `model.main`，实际用个人 provider 存储里第一个 provider 的第一个模型（`glm/glm-5.3-flash`）——这正是改接 `glm` provider 而不是新增 provider 的原因。

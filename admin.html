@@ -92,6 +92,20 @@
   .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .tbl th { text-align: left; color: var(--dim); font-weight: 600; padding: 5px 6px; border-bottom: 1px solid var(--line); }
   .tbl td { padding: 5px 6px; border-bottom: 1px solid var(--line); }
+  .tbl.perf { width: max-content; min-width: 100%; }
+  .tbl.perf th, .tbl.perf td { white-space: nowrap; }
+  .tbl.perf th.score { color: var(--accent-hover); background: var(--accent-soft); }
+  .tbl.perf td.score { background: var(--accent-soft); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tbl.perf tr.best td { background: var(--accent-soft); }
+  .tbl.perf tr.best td.score { background: var(--accent); color: #fffaf6; }
+  .scorebar {
+    display: inline-block; width: 28px; height: 5px; margin-left: 6px; border-radius: 99px;
+    background: color-mix(in srgb, var(--accent) 28%, transparent); vertical-align: middle; overflow: hidden;
+  }
+  .scorebar i { display: block; height: 100%; background: var(--accent); }
+  .tbl.perf tr.best .scorebar { background: rgba(255,255,255,.35); }
+  .tbl.perf tr.best .scorebar i { background: #fff; }
+  .scroll { overflow-x: auto; }
   /* 统计范围切换（今日/近7天/近30天），参考 cc-switch 的 range presets */
   .seg { display: inline-flex; background: var(--chip); border-radius: 999px; padding: 3px; gap: 2px; font-family: -apple-system, "PingFang SC", sans-serif; }
   .seg button { border: none; background: transparent; padding: 4px 12px; font-size: 12px; border-radius: 999px; color: var(--dim); }
@@ -130,6 +144,7 @@
     <div class="kv"><span class="k">JWT</span><span id="cJwt">…</span></div>
     <div class="kv"><span class="k">过期时间</span><span id="cExp" class="dim">…</span></div>
     <div class="kv"><span class="k">VK</span><span id="cVk">…</span></div>
+    <div class="kv"><span class="k">VK 配额</span><span id="cVkQuota" class="dim">…</span></div>
   </div>
 </div>
 
@@ -170,9 +185,32 @@
   <div class="dim" style="font-size:11px;margin-top:6px">tokens 为上游报告值，未上报 usage 的流式调用计 0；统计持久化在运行时目录，保留近 30 天，卸载代理即清零。</div>
 </div>
 
+<div class="card" style="margin-top:14px">
+  <h2>模型性能 <span class="dim" style="font-weight:500;font-size:12px">与上方同一区间 · 同一输入档内按速度分排序</span></h2>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+    <span class="seg" id="bandSeg">
+      <button data-band="s" class="active" title="输入少于 1000 token">短</button>
+      <button data-band="m" title="输入 1000–3999 token">中</button>
+      <button data-band="l" title="输入不少于 4000 token">长</button>
+    </span>
+    <span class="dim" id="bandHint" style="font-size:11px"></span>
+  </div>
+  <div class="statrow">
+    <div class="stat"><div class="num" id="pTtft">–</div><div class="lbl">TTFT 中位</div></div>
+    <div class="stat"><div class="num" id="pTtft99">–</div><div class="lbl">TTFT P99</div></div>
+    <div class="stat"><div class="num" id="pTps">–</div><div class="lbl">解码速度</div></div>
+    <div class="stat"><div class="num" id="pTpot">–</div><div class="lbl">TPOT 中位</div></div>
+    <div class="stat"><div class="num" id="pItl">–</div><div class="lbl">ITL 中位</div></div>
+    <div class="stat"><div class="num" id="pE2e">–</div><div class="lbl">E2E 中位</div></div>
+  </div>
+  <div class="scroll"><table class="tbl perf" id="ptbl"></table></div>
+  <div class="dim" style="font-size:11px;margin-top:6px">速度分只在当前输入档里比：中位 TTFT + 中位 TPOT × 127，换成生成 128 token 的等效 tok/s，最快为 100。短 &lt; 1000、中 1000–3999、长 ≥ 4000 输入 token；没有 usage 的请求不进档。ITL 中位明显慢于 TPOT 时略降。「对比全部模型」用同一条短提示和同一条长提示依次请求每个模型，输出都是从 1 数到 20。</div>
+</div>
+
 <div class="actions">
   <select id="model"></select>
   <button class="primary" id="btnTest">发送测试请求</button>
+  <button id="btnBench">对比全部模型</button>
   <button id="btnRestart">重启服务</button>
   <button class="danger" id="btnStop">停止服务</button>
 </div>
@@ -208,8 +246,13 @@ function render(h) {
     $('jwtBanner').style.display = 'block';
   }
   $('cVk').textContent = h.vkCached
-    ? '已缓存' + (h.vkCachedAt ? `（${h.vkCachedAt.slice(11,16)} 换取）` : '')
+    ? '已缓存' + (h.vkCachedAt ? `（${h.vkCachedAt.slice(11,16)} 换取）` : '') + (h.vkSource ? ` · 来源 ${h.vkSource}` : '')
     : '未换取';
+  const q = h.vkQuota;
+  const allowN = q?.modelAllowList ? q.modelAllowList.split(',').filter(Boolean).length : 0;
+  $('cVkQuota').textContent = q
+    ? `日 ${fmtTok(q.dailyQuota)} · 月 ${fmtTok(q.monthlyQuota)}` + (allowN ? ` · 白名单 ${allowN} 个模型` : '')
+    : '未知（VK 取自 auth.json 或缓存时无配额信息）';
 }
 
 async function loadModels() {
@@ -247,13 +290,120 @@ async function poll() {
 }
 
 const fmtTok = (n) => n == null ? '–' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e4 ? (n/1e3).toFixed(1)+'k' : String(n);
+const fmtMs = (v) => {
+  if (v == null || !Number.isFinite(v)) return '–';
+  if (v >= 10000) return (v / 1000).toFixed(0) + 's';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 's';
+  if (v >= 100) return Math.round(v) + 'ms';
+  return (Math.round(v * 10) / 10) + 'ms';
+};
+const fmtSpeed = (dtok, dms) => {
+  if (!dtok || !dms) return '–';
+  const tps = dtok / (dms / 1000);
+  return (tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1)) + ' tok/s';
+};
+function quantile(h, q, edges) {
+  if (!h?.n || !edges?.length || !Array.isArray(h.b)) return null;
+  const target = q * h.n;
+  const bounds = [0, ...edges, Infinity];
+  let acc = 0;
+  for (let i = 0; i < h.b.length; i++) {
+    const c = h.b[i] || 0;
+    if (!c) { acc += c; continue; }
+    const next = acc + c;
+    if (next >= target) {
+      const lo = bounds[i] ?? 0;
+      const hi = bounds[i + 1];
+      if (!Number.isFinite(hi)) return lo;
+      return lo + (hi - lo) * Math.min(1, Math.max(0, (target - acc) / c));
+    }
+    acc = next;
+  }
+  return null;
+}
+function exactQuantile(values, q) {
+  const sorted = values.slice().sort((a, b) => a - b);
+  const idx = (sorted.length - 1) * q;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] * (hi - idx) + sorted[hi] * (idx - lo);
+}
+function metricQ(h, q, edges) {
+  if (!h?.n) return null;
+  if (Array.isArray(h.s) && h.s.length === h.n) return exactQuantile(h.s, q);
+  return quantile(h, q, edges);
+}
+// 生成 128 token 的等效速度。ITL 比 TPOT 更慢时，按卡顿程度最多降到 0.8 倍。
+const SPEED_TOKENS = 128;
+function speedParts(perf, edges) {
+  if (!perf?.ttft?.n) return null;
+  const ttft = metricQ(perf.ttft, 0.5, edges);
+  const tpot = metricQ(perf.tpot, 0.5, edges);
+  const itl = metricQ(perf.itl, 0.5, edges);
+  const tps = perf.dtok > 0 && perf.dms > 0 ? perf.dtok / (perf.dms / 1000) : null;
+  let gen = null;
+  if (tpot > 0) gen = tpot * (SPEED_TOKENS - 1);
+  else if (tps > 0) gen = (SPEED_TOKENS - 1) / tps * 1000;
+  if (!(ttft >= 0) || !(gen > 0)) return null;
+  let smooth = 1;
+  if (itl > 0 && tpot > 0) smooth = 1 / Math.max(1, Math.min(itl / tpot, 3));
+  const factor = 0.8 + 0.2 * smooth;
+  return { eff: SPEED_TOKENS / ((ttft + gen) / 1000) * factor, totalMs: ttft + gen, smooth };
+}
+function speedRank(rows, edges) {
+  const ranked = rows.map((m) => ({ m, part: speedParts(m.perf, edges) }));
+  const best = Math.max(0, ...ranked.map((x) => x.part?.eff || 0));
+  return ranked.map((x) => ({
+    ...x,
+    score: x.part && best > 0 ? Math.max(1, Math.round(x.part.eff / best * 100)) : null,
+  })).sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || (b.m.req || 0) - (a.m.req || 0));
+}
+function mergeHist(dst, src) {
+  if (!src?.n) return dst;
+  if (!dst) {
+    const copy = { n: src.n, sum: src.sum || 0, b: (src.b || []).slice() };
+    if (Array.isArray(src.s) && src.s.length === src.n) copy.s = src.s.slice();
+    return copy;
+  }
+  const dstOk = Array.isArray(dst.s) && dst.s.length === dst.n;
+  const srcOk = Array.isArray(src.s) && src.s.length === src.n;
+  dst.n += src.n;
+  dst.sum += src.sum || 0;
+  for (let i = 0; i < (src.b || []).length; i++) dst.b[i] = (dst.b[i] || 0) + src.b[i];
+  if (dstOk && srcOk && dst.s.length + src.s.length <= 2000) dst.s = dst.s.concat(src.s);
+  else delete dst.s;
+  return dst;
+}
+function mergePerf(dst, src) {
+  if (!src) return dst;
+  if (!dst) dst = { dtok: 0, dms: 0, dn: 0 };
+  dst.dtok += src.dtok || 0;
+  dst.dms += src.dms || 0;
+  dst.dn += src.dn || 0;
+  for (const k of ['ttft', 'tpot', 'itl', 'e2e']) dst[k] = mergeHist(dst[k], src[k]);
+  if (src.bands) {
+    dst.bands ??= {};
+    for (const id of ['s', 'm', 'l']) {
+      if (src.bands[id]) dst.bands[id] = mergePerf(dst.bands[id], src.bands[id]);
+    }
+  }
+  return dst;
+}
+let inputBand = 's';
+const BAND_NAME = { s: '短', m: '中', l: '长' };
+function viewPerf(perf) { return perf?.bands?.[inputBand] || null; }
 
 // ---- 流量统计：今日/近7天/近30天区间切换（参考 cc-switch 用量页） ----------
 let statRange = 'today';
 let lastStats = null;
 
-const emptyB = () => ({ req: 0, err: 0, tin: 0, tout: 0, ms: 0 });
-const addB = (a, b) => { a.req += b.req || 0; a.err += b.err || 0; a.tin += b.tin || 0; a.tout += b.tout || 0; a.ms += b.ms || 0; return a; };
+const emptyB = () => ({ req: 0, err: 0, tin: 0, tout: 0, ms: 0, perf: null });
+const addB = (a, b) => {
+  a.req += b.req || 0; a.err += b.err || 0; a.tin += b.tin || 0; a.tout += b.tout || 0; a.ms += b.ms || 0;
+  if (b.perf) a.perf = mergePerf(a.perf, b.perf);
+  return a;
+};
 const dayKeyOff = (off) => {
   const d = new Date(); d.setDate(d.getDate() - off);
   const p = (n) => String(n).padStart(2, '0');
@@ -296,6 +446,25 @@ function drawStats() {
   $('tOut').textContent = fmtTok(totals.tout);
   $('tAvg').textContent = totals.req ? Math.round(totals.ms / totals.req) + 'ms' : '–';
 
+  const edges = s.latEdges || [];
+  const tp = viewPerf(totals.perf);
+  const q = (h, p) => fmtMs(metricQ(h, p, edges));
+  $('pTtft').textContent = q(tp?.ttft, 0.5);
+  $('pTtft99').textContent = q(tp?.ttft, 0.99);
+  $('pTps').textContent = fmtSpeed(tp?.dtok, tp?.dms);
+  $('pTpot').textContent = q(tp?.tpot, 0.5);
+  $('pItl').textContent = q(tp?.itl, 0.5);
+  $('pE2e').textContent = q(tp?.e2e, 0.5);
+  $('pTps').title = tp?.dn ? `${BAND_NAME[inputBand]}输入 · ${tp.dn} 次可解码的流式请求，按输出 token 加权` : '这一档没有可拆开的流式解码';
+  document.querySelectorAll('#bandSeg button').forEach((b) => {
+    const n = totals.perf?.bands?.[b.dataset.band]?.ttft?.n || 0;
+    b.textContent = BAND_NAME[b.dataset.band] + (n ? ' ' + n : '');
+    b.classList.toggle('active', b.dataset.band === inputBand);
+  });
+  $('bandHint').textContent = tp?.ttft?.n
+    ? `${BAND_NAME[inputBand]}输入 · ${tp.ttft.n} 次`
+    : `${BAND_NAME[inputBand]}输入还没有样本`;
+
   const nowH = new Date().getHours();
   let bars, xlabels, ymaxSrc, caption = '';
   if (seq) {
@@ -333,7 +502,110 @@ function drawStats() {
       `<td>${fmtTok(m.tin)}</td><td>${fmtTok(m.tout)}</td>` +
       `<td class="dim">${m.req ? Math.round(m.ms / m.req) + 'ms' : '–'}</td></tr>`
     ).join('') : '<tr><td colspan="6" class="dim">所选区间还没有模型流量</td></tr>');
+
+  const cell = (h) => {
+    const v = q(h, 0.5);
+    if (!h?.n) return '<td class="dim">–</td>';
+    const mean = h.sum / h.n;
+    const title = `n=${h.n} · 均值 ${fmtMs(mean)} · P99 ${q(h, 0.99)}`;
+    return `<td title="${title}">${v}</td>`;
+  };
+  const ranked = speedRank(models.map((m) => ({ ...m, perf: viewPerf(m.perf) })).filter((m) => m.perf?.ttft?.n), edges);
+  const top = ranked.find((x) => x.score != null)?.score ?? null;
+  $('ptbl').innerHTML =
+    '<tr><th>模型</th><th class="score" title="生成 128 token 的等效速度，当前区间最快为 100">速度分</th>' +
+    '<th title="有首 token 的流式请求数">样本</th>' +
+    '<th title="Time To First Token：发出上游请求到首个输出块">TTFT 中位</th><th>TTFT P99</th>' +
+    '<th title="解码 token / 解码时间，按 token 加权">解码 tok/s</th>' +
+    '<th title="Time Per Output Token：解码段 / (输出 token − 首包 token)">TPOT 中位</th><th>TPOT P99</th>' +
+    '<th title="Inter-Token Latency：输出块间隔 / 该块 token 数">ITL 中位</th><th>ITL P99</th>' +
+    '<th title="发出上游请求到流结束">E2E 中位</th></tr>' +
+    (ranked.length ? ranked.map(({ m, part, score }) => {
+      const p = m.perf;
+      const best = score != null && score === top;
+      const tip = part
+        ? `${BAND_NAME[inputBand]}输入 · 128 token 约 ${fmtMs(part.totalMs)} · 等效 ${part.eff.toFixed(1)} tok/s` +
+          (part.smooth < 0.999 ? ` · ITL 偏慢，顺滑 ${Math.round(part.smooth * 100)}%` : '')
+        : '这一档还拆不出解码段，没有速度分';
+      const scoreCell = score == null
+        ? '<td class="score dim">–</td>'
+        : `<td class="score" title="${tip}"><b>${score}</b><span class="scorebar"><i style="width:${score}%"></i></span></td>`;
+      return `<tr class="${best ? 'best' : ''}"><td>${m.id}</td>${scoreCell}<td>${p.ttft.n}</td>` +
+        cell(p.ttft) + `<td title="n=${p.ttft.n}">${q(p.ttft, 0.99)}</td>` +
+        `<td title="${p.dn || 0} 次计入解码速度">${fmtSpeed(p.dtok, p.dms)}</td>` +
+        cell(p.tpot) + `<td>${q(p.tpot, 0.99)}</td>` +
+        cell(p.itl) + `<td>${q(p.itl, 0.99)}</td>` +
+        cell(p.e2e) + '</tr>';
+    }).join('') : '<tr><td colspan="11" class="dim">这一档还没有可评估的流式响应</td></tr>');
 }
+
+document.querySelectorAll('#bandSeg button').forEach((b) => {
+  b.onclick = () => {
+    inputBand = b.dataset.band;
+    drawStats();
+  };
+});
+
+const SHORT_PROMPT = '从 1 数到 20，每个数字之间用空格隔开。';
+const LONG_PAD = '这段固定文字只用于把输入拉长，好和短提示比较首 token 时间。';
+function longPrompt() {
+  let s = '';
+  while (s.length < 6000) s += LONG_PAD;
+  return s + '\n' + SHORT_PROMPT;
+}
+
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+async function streamOnce(model, content) {
+  const r = await fetch('/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model, stream: true, max_tokens: 128,
+      messages: [{ role: 'user', content }],
+    }),
+  });
+  if (!r.ok || !r.body) {
+    const text = await r.text().catch(() => '');
+    throw new Error(text.slice(0, 180) || `HTTP ${r.status}`);
+  }
+  const reader = r.body.getReader();
+  while (true) {
+    const { done } = await reader.read();
+    if (done) break;
+  }
+}
+
+$('btnBench').onclick = async () => {
+  const list = models.map((m) => m.id).filter(Boolean);
+  if (!list.length) { alert('模型列表还没加载出来。'); return; }
+  const jobs = list.flatMap((id) => [
+    { id, band: '短', prompt: SHORT_PROMPT },
+    { id, band: '长', prompt: longPrompt() },
+  ]);
+  if (!confirm(`用同一条短提示和同一条长提示，依次测试 ${list.length} 个模型，共 ${jobs.length} 次。请留在这个页面直到结束。`)) return;
+  const btn = $('btnBench');
+  const box = $('result');
+  btn.disabled = true;
+  box.hidden = false;
+  let ok = 0, fail = 0;
+  const errors = [];
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i];
+    box.innerHTML = `<span class="dim">对比 ${i + 1}/${jobs.length} · ${esc(job.id)} · ${job.band}提示…</span>`;
+    try {
+      await streamOnce(job.id, job.prompt);
+      ok++;
+    } catch (e) {
+      fail++;
+      errors.push(`${esc(job.id)} ${job.band}：${esc(e.message || e)}`);
+    }
+  }
+  btn.disabled = false;
+  box.innerHTML = `对比结束：成功 ${ok}，失败 ${fail}。短提示在「短」里，长提示在「长」里。` +
+    (errors.length ? `\n<span class="bad">${errors.slice(0, 4).join('\n')}</span>` : '');
+  poll();
+};
 
 document.querySelectorAll('#rangeSeg button').forEach((b) => {
   b.onclick = () => {
@@ -348,20 +620,39 @@ function renderStats(s) { lastStats = s; drawStats(); }
 $('btnTest').onclick = async () => {
   const model = $('model').value;
   const box = $('result'); box.hidden = false;
-  box.innerHTML = `<span class="dim">向 ${model} 发送测试请求…</span>`;
+  box.innerHTML = `<span class="dim">向 ${model} 发送流式测试…</span>`;
   const t0 = Date.now();
   try {
-    const d = await jf('/v1/chat/completions', {
+    const r = await fetch('/v1/chat/completions', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, max_tokens: 512,
-        messages: [{ role: 'user', content: '只回复两个字：成功' }] }),
+      body: JSON.stringify({ model, max_tokens: 128, stream: true,
+        messages: [{ role: 'user', content: '用一句话介绍你自己' }] }),
     });
-    if (d.choices) {
-      const c = d.choices[0].message;
-      box.innerHTML = `模型 <b>${model}</b> · ${Date.now()-t0}ms\n回复：<b>${(c.content||'').replace(/</g,'&lt;') || '(空，可能都在 reasoning 里)'}</b>`;
-    } else {
-      box.innerHTML = `<span class="bad">失败：</span>${JSON.stringify(d).slice(0, 400)}`;
+    if (!r.ok || !r.body) {
+      box.innerHTML = `<span class="bad">失败：</span>${(await r.text()).slice(0, 400)}`;
+      return;
     }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', text = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        try {
+          const c = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (c) text += c;
+        } catch {}
+      }
+    }
+    box.innerHTML = `模型 <b>${model}</b> · ${Date.now()-t0}ms（流式）\n回复：<b>${text.replace(/</g,'&lt;') || '(空，可能都在 reasoning 里)'}</b>\n<span class="dim">性能样本已记入「模型性能」，几秒内刷新。</span>`;
   } catch (e) { box.innerHTML = `<span class="bad">请求异常：</span>${e}`; }
 };
 

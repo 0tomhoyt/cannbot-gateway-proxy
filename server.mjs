@@ -8,7 +8,12 @@
 //
 // 凭证（每次请求现取，不在任何配置里烘死）:
 //   JWT ← ~/.local/share/opencode/session.json .accessToken（CANNWork 扩展登录时刷新，24h 有效）
-//   VK  ← GET /cannbot/api/models/personal（用 JWT 换取；账号级，不绑定模型；带磁盘缓存，401 时自动重取）
+//   VK  ← ① ~/.local/share/opencode/auth.json .cannbot.key（CANNWork 2.0.2+ 登录时写入，官方位置）
+//         ② GET /cannbot/api/ai-keys/vk/my（JWT 换取，权威来源，附带配额与模型白名单）
+//         ③ GET /cannbot/api/models/personal 各模型自带的 apiKey（遗留接口兜底）
+//         常规顺序: 内存/磁盘缓存 → ① → ② → ③；上游 401 后跳过缓存从 ② 开始重取
+//   模型 ← GET /cannbot/api/models/list（2.0.2+ 官方接口，仅取 status=1）；
+//         不可用时回落遗留接口 /cannbot/api/models/personal
 //
 // 运行时文件（proxy.log / vk-cache.json）落在本脚本所在目录，随项目文件夹整体移动。
 // 端口: 8484（环境变量 CANNBOT_PROXY_PORT 可覆盖），只绑 127.0.0.1
@@ -29,6 +34,8 @@ const GATEWAY = 'https://cannbot.hicann.cn';
 const GW_API = `${GATEWAY}/gateway/compatible-mode/v1`;
 const SESSION_FILE = process.env.CANNBOT_SESSION_FILE
   || path.join(os.homedir(), '.local/share/opencode/session.json');
+const AUTH_JSON_FILE = process.env.CANNBOT_AUTH_FILE
+  || path.join(os.homedir(), '.local/share/opencode/auth.json');
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const VK_CACHE = path.join(SCRIPT_DIR, 'vk-cache.json');
 const LOG_FILE = path.join(SCRIPT_DIR, 'proxy.log');
@@ -105,9 +112,17 @@ function readJwt() {
   return { jwt, userId: payload.userId, expMs };
 }
 
-// /cannbot/api/models/personal 一次响应里同时含「模型列表」与「账号级 VK(apiKey)」，
-// 合并为一份缓存 personalCache，避免 VK 与模型列表各打一次上游。
-let personalCache = null; // { userId, at, vk, models }
+// 凭证/模型缓存。VK 与模型列表来源不同、更新时机不同，分开存放：
+//   vk/vkSource/vkQuota  账号级虚拟密钥及其来源与配额（配额仅 VK 接口网络换取时才有）
+//   models/modelsAt      模型列表（TTL 见 MODELS_TTL）
+let personalCache = null; // { userId, vk, vkAt, vkSource, vkQuota, models, modelsAt }
+
+function cacheOf(userId) {
+  if (personalCache?.userId !== userId) {
+    personalCache = { userId, vk: null, vkAt: 0, vkSource: null, vkQuota: null, models: null, modelsAt: 0 };
+  }
+  return personalCache;
+}
 
 function readVkDisk(userId) {
   try {
@@ -115,6 +130,16 @@ function readVkDisk(userId) {
     if (d.userId === userId && d.vk) return d.vk;
   } catch {}
   return null;
+}
+
+function rememberVk(userId, vk, source, quota = null) {
+  const c = cacheOf(userId);
+  c.vk = vk;
+  c.vkAt = Date.now();
+  c.vkSource = source;
+  if (quota) c.vkQuota = quota;
+  try { fs.writeFileSync(VK_CACHE, JSON.stringify({ userId, vk, at: c.vkAt })); } catch {}
+  return vk;
 }
 
 function buildModels(items) {
@@ -133,55 +158,137 @@ function buildModels(items) {
   return [...seen.values()].filter((m) => !EXCLUDE_MODELS.has(m.id));
 }
 
-// needVk=true（凭证路径）时缺 VK 视为错误；needVk=false（仅取模型列表）时容忍无 VK。
-async function fetchPersonal(jwt, userId, { needVk = true } = {}) {
+// VK 来源①：~/.local/share/opencode/auth.json（CANNWork 2.0.2+ 登录时经
+// /cannbot/api/ai-keys/vk/my 换取后写入；扩展自己发请求也读这里，本代理与其同源）
+function readVkAuthJson() {
+  try {
+    const d = JSON.parse(fs.readFileSync(AUTH_JSON_FILE, 'utf8'));
+    const vk = d?.cannbot?.key;
+    return typeof vk === 'string' && vk ? vk : null;
+  } catch { return null; }
+}
+
+// VK 来源②：GET /cannbot/api/ai-keys/vk/my（JWT 换取的权威来源，附带配额与模型白名单）
+async function fetchVkApi(jwt) {
+  const res = await fetch(`${GATEWAY}/cannbot/api/ai-keys/vk/my`, {
+    headers: { authorization: `Bearer ${jwt}` },
+  });
+  if (!res.ok) return null;
+  const data = (await res.json().catch(() => null))?.data;
+  if (!data?.vk) return null;
+  return {
+    vk: data.vk,
+    quota: {
+      dailyQuota: data.dailyQuota ?? null,
+      monthlyQuota: data.monthlyQuota ?? null,
+      priority: data.priority ?? null,
+      modelAllowList: data.modelAllowList ?? null,
+    },
+  };
+}
+
+// 模型列表（官方，CANNWork 2.0.2+ 同源）：GET /cannbot/api/models/list，
+// 裸分页结构（无 success/data 包装），status=1 为启用。
+async function fetchModelsList(jwt) {
+  const url = new URL(`${GATEWAY}/cannbot/api/models/list`);
+  url.searchParams.set('page', '1');
+  url.searchParams.set('size', '100');
+  const res = await fetch(url, { headers: { authorization: `Bearer ${jwt}` } });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const items = (Array.isArray(body?.models) ? body.models : []).filter((m) => m?.model && m.status === 1);
+  return items.length ? items : null;
+}
+
+// 模型列表 + VK（遗留）：GET /cannbot/api/models/personal，
+// personal/builtin 两列各带 apiKey。接口仍可用但已不在官方代码路径上，仅兜底。
+async function fetchModelsPersonal(jwt) {
   const res = await fetch(`${GATEWAY}/cannbot/api/models/personal`, {
     headers: { authorization: `Bearer ${jwt}` },
   });
-  if (!res.ok) {
-    throw httpError(502,
-      `拉取模型/凭证失败: HTTP ${res.status}（JWT 可能已失效，请在 CANNWork 扩展重新登录）`,
-      needVk ? 'vk_fetch_failed' : 'models_fetch_failed');
-  }
-  const body = await res.json();
-  const items = [...(body?.data?.personalModels ?? []), ...(body?.data?.builtinModels ?? [])];
-  const vk = items.map((m) => m.apiKey).find(Boolean) ?? null;
-  if (needVk && !vk) throw httpError(502, '模型列表响应中没有 VK(apiKey)', 'vk_missing');
-  personalCache = { userId, at: Date.now(), vk, models: buildModels(items) };
-  if (vk) {
-    try { fs.writeFileSync(VK_CACHE, JSON.stringify({ userId, vk, at: personalCache.at })); } catch {}
-  }
-  return personalCache;
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null);
+  const items = [...(body?.data?.personalModels ?? []), ...(body?.data?.builtinModels ?? [])]
+    .filter((m) => m?.model);
+  return items.length ? items : null;
 }
 
+// VK 解析。常规顺序: 内存 → 磁盘 vk-cache → auth.json → VK 接口 → 遗留接口；
+// force（上游 401 后）跳过所有本地缓存，网络权威来源优先: VK 接口 → auth.json → 遗留接口。
 async function getVk(jwt, userId, force = false) {
-  if (!force && personalCache && personalCache.userId === userId && personalCache.vk) {
-    return personalCache.vk;
-  }
   if (!force) {
+    if (personalCache?.userId === userId && personalCache.vk) {
+      probeQuotaBackground(jwt, userId);
+      return personalCache.vk;
+    }
     const disk = readVkDisk(userId);
     if (disk) {
-      // 磁盘 VK 兜底；保留同用户已取到的 models，避免无谓重取
-      const models = personalCache?.userId === userId ? personalCache.models : null;
-      personalCache = { userId, at: Date.now(), vk: disk, models };
+      const c = cacheOf(userId); // 保留同用户已取到的 models，避免无谓重取
+      c.vk = disk; c.vkAt = Date.now(); c.vkSource = 'cache';
+      probeQuotaBackground(jwt, userId);
       return disk;
     }
+    const authVk = readVkAuthJson();
+    if (authVk) {
+      const vk = rememberVk(userId, authVk, 'auth.json');
+      probeQuotaBackground(jwt, userId);
+      return vk;
+    }
   }
-  return (await fetchPersonal(jwt, userId, { needVk: true })).vk;
+  const api = await fetchVkApi(jwt).catch(() => null);
+  if (api?.vk) return rememberVk(userId, api.vk, 'ai-keys', api.quota);
+  const authVk = readVkAuthJson();
+  if (authVk) return rememberVk(userId, authVk, 'auth.json');
+  const legacyItems = await fetchModelsPersonal(jwt).catch(() => null);
+  const legacyVk = legacyItems?.map((m) => m.apiKey).find(Boolean) ?? null;
+  if (legacyVk) return rememberVk(userId, legacyVk, 'legacy-models');
+  throw httpError(502,
+    '无法获取 VK：auth.json / ai-keys 接口 / 遗留模型接口均未取到（JWT 可能已失效，请在 CANNWork 扩展重新登录）',
+    'vk_fetch_failed');
+}
+
+// VK 取自 auth.json/缓存时没有配额信息。每个进程生命周期后台补查一次 ai-keys 接口：
+// 拿到配额供管理台展示，顺带与权威来源核对——本地 VK 过期(如扩展长期未重登)时采纳接口值自愈。
+let quotaProbing = false;
+function probeQuotaBackground(jwt, userId) {
+  if (quotaProbing || (personalCache?.userId === userId && personalCache.vkQuota)) return;
+  quotaProbing = true;
+  fetchVkApi(jwt)
+    .then((r) => {
+      if (!r?.vk || personalCache?.userId !== userId) return;
+      if (personalCache.vk === r.vk) {
+        personalCache.vkQuota = r.quota; // 同一把 VK：只补配额
+      } else {
+        const from = personalCache.vkSource;
+        rememberVk(userId, r.vk, 'ai-keys', r.quota);
+        log(`VK 与 ai-keys 接口不一致（本地来源 ${from}），已采纳接口值`);
+      }
+    })
+    .catch(() => {})
+    .finally(() => { quotaProbing = false; });
 }
 
 // ---- 网关调用（带 401 自动重取 VK 重试一次） ---------------------------
 
+// 上游 fetch 发出的时刻（performance.now）。TTFT 从这里起算，不含本地换 VK 的时间。
+const fetchStart = new WeakMap();
+
 async function gatewayRequest(pathSuffix, { method = 'POST', headers = {}, body } = {}) {
   const { jwt, userId } = readJwt();
   const h = { authorization: `Bearer ${jwt}`, 'x-api-vkey': await getVk(jwt, userId), ...headers };
-  let up = await fetch(`${GW_API}${pathSuffix}`, { method, headers: h, body });
+  const send = async () => {
+    const tFetch = performance.now();
+    const res = await fetch(`${GW_API}${pathSuffix}`, { method, headers: h, body });
+    fetchStart.set(res, tFetch);
+    return res;
+  };
+  let up = await send();
   // 仅 401 视为 VK 失效自动重取重试；403（如 "Model not allowed"）是账号级权限问题，
   // 重取 VK 无济于事，直接透传给客户端。
   if (up.status === 401) {
     log(`401 → 刷新 VK 重试 ${method} ${pathSuffix}`);
     h['x-api-vkey'] = await getVk(jwt, userId, true);
-    up = await fetch(`${GW_API}${pathSuffix}`, { method, headers: h, body });
+    up = await send();
   }
   return up;
 }
@@ -190,11 +297,21 @@ async function gatewayRequest(pathSuffix, { method = 'POST', headers = {}, body 
 
 async function getModels() {
   const { jwt, userId } = readJwt();
-  if (personalCache && personalCache.userId === userId
-      && personalCache.models && Date.now() - personalCache.at < MODELS_TTL) {
+  if (personalCache?.userId === userId
+      && personalCache.models?.length && Date.now() - personalCache.modelsAt < MODELS_TTL) {
     return personalCache.models;
   }
-  const c = await fetchPersonal(jwt, userId, { needVk: false });
+  // 官方 /models/list 优先（与 CANNWork 2.0.2+ 扩展同源），遗留 /models/personal 兜底
+  let items = await fetchModelsList(jwt).catch(() => null);
+  if (!items) items = await fetchModelsPersonal(jwt).catch(() => null);
+  if (!items) {
+    throw httpError(502,
+      '拉取模型列表失败: /models/list 与 /models/personal 均不可用（JWT 可能已失效，请在 CANNWork 扩展重新登录）',
+      'models_fetch_failed');
+  }
+  const c = cacheOf(userId);
+  c.models = buildModels(items);
+  c.modelsAt = Date.now();
   return c.models;
 }
 
@@ -215,15 +332,55 @@ function extractModel(bodyBuf) {
   try { return JSON.parse(bodyBuf.toString('utf8')).model ?? null; } catch { return null; }
 }
 
+// 流式 chat 补上 include_usage，否则上游不回 usage，解码速度无法按 token 计算。
+// 只改发给网关的请求体；已显式打开的不重复包一层。
+function withStreamUsage(urlPath, bodyBuf) {
+  if (!bodyBuf?.length || !/\/(chat\/completions|completions)$/.test(urlPath)) return bodyBuf;
+  let body;
+  try { body = JSON.parse(bodyBuf.toString('utf8')); } catch { return bodyBuf; }
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !body.stream) return bodyBuf;
+  if (body.stream_options?.include_usage) return bodyBuf;
+  body.stream_options = { ...body.stream_options, include_usage: true };
+  return Buffer.from(JSON.stringify(body));
+}
+
+// 输出文本的 token 权重。没有各模型自己的 tokenizer，用字符近似：
+// CJK / 假名 / 全角区按 1 token，其余按约 4 字 1 token。只用来把上游的
+// completion_tokens 摊到各个 SSE 块，总和之后会归一化成上游计数。
+function textWeight(s) {
+  let w = 0;
+  for (const ch of s) w += ch.codePointAt(0) > 0x2e80 ? 4 : 1;
+  return w;
+}
+
+function outputWeight(j) {
+  const choice = Array.isArray(j?.choices) ? j.choices[0] : null;
+  if (!choice) return 0;
+  const d = choice.delta || {};
+  let w = 0;
+  if (typeof d.content === 'string') w += textWeight(d.content);
+  if (typeof d.reasoning_content === 'string') w += textWeight(d.reasoning_content);
+  if (typeof d.text === 'string') w += textWeight(d.text);
+  if (typeof choice.text === 'string') w += textWeight(choice.text);
+  if (Array.isArray(d.tool_calls)) {
+    for (const tc of d.tool_calls) {
+      if (typeof tc?.function?.name === 'string') w += textWeight(tc.function.name);
+      if (typeof tc?.function?.arguments === 'string') w += textWeight(tc.function.arguments);
+    }
+  }
+  return w;
+}
+
 async function forward(req, res, urlPath, bodyBuf) {
   const t0 = Date.now();
   const upstreamPath = urlPath.replace(/^\/v1/, '') || '/';
   const headers = { 'content-type': req.headers['content-type'] ?? 'application/json' };
   if (req.headers.accept) headers.accept = req.headers.accept;
+  const upstreamBody = req.method === 'GET' || req.method === 'HEAD' ? undefined : withStreamUsage(urlPath, bodyBuf);
   const up = await gatewayRequest(upstreamPath, {
     method: req.method,
     headers,
-    body: req.method === 'GET' || req.method === 'HEAD' ? undefined : bodyBuf,
+    body: upstreamBody,
   });
   const respHeaders = {};
   for (const h of PASSTHROUGH_HEADERS) {
@@ -232,17 +389,20 @@ async function forward(req, res, urlPath, bodyBuf) {
   }
   res.writeHead(up.status, respHeaders);
 
-  // 流量统计：透传的同时旁路采集字节数与 usage
+  // 流量统计：透传的同时旁路采集字节数、usage，以及流式性能样本
   const st = {
     model: extractModel(bodyBuf) ?? '-',
     status: up.status, ms: 0,
     bytesIn: bodyBuf?.length ?? 0, bytesOut: 0, tin: 0, tout: 0,
   };
+  const tFetch = fetchStart.get(up) ?? null;
+  const marks = []; // { at, w } 每次真正有输出的 SSE 块
   let recorded = false;
   const finishStats = () => {
     if (recorded) return;
     recorded = true;
     st.ms = Date.now() - t0;
+    if (tFetch != null && marks.length) st.perf = observeStream(tFetch, marks, st.tout, performance.now());
     recordStats(st);
   };
 
@@ -253,8 +413,22 @@ async function forward(req, res, urlPath, bodyBuf) {
     const ct = (up.headers.get('content-type') || '').toLowerCase();
     let tap;
     if (ct.includes('text/event-stream')) {
-      // SSE：逐行扫描 data: 帧，抓最后携带的 usage（客户端未要求 include_usage 时没有，计 0）
+      // SSE：逐行扫描 data: 帧，抓 usage 与输出 token 的到达时间（解码速度用）
       let lineBuf = '';
+      const absorbSse = (line) => {
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') return;
+        try {
+          const j = JSON.parse(data);
+          if (j.usage) {
+            st.tin = j.usage.prompt_tokens ?? st.tin;
+            st.tout = j.usage.completion_tokens ?? st.tout;
+          }
+          const w = outputWeight(j);
+          if (w > 0) marks.push({ at: performance.now(), w });
+        } catch {}
+      };
       tap = new Transform({
         transform(chunk, enc, cb) {
           st.bytesOut += chunk.length;
@@ -263,19 +437,11 @@ async function forward(req, res, urlPath, bodyBuf) {
           while ((idx = lineBuf.indexOf('\n')) !== -1) {
             const line = lineBuf.slice(0, idx).trim();
             lineBuf = lineBuf.slice(idx + 1);
-            if (line.startsWith('data:')) {
-              try {
-                const j = JSON.parse(line.slice(5).trim());
-                if (j.usage) {
-                  st.tin = j.usage.prompt_tokens ?? st.tin;
-                  st.tout = j.usage.completion_tokens ?? st.tout;
-                }
-              } catch {}
-            }
+            absorbSse(line);
           }
           cb(null, chunk);
         },
-        flush(cb) { finishStats(); cb(); },
+        flush(cb) { absorbSse(lineBuf.trim()); finishStats(); cb(); },
       });
     } else {
       // JSON：整体收集后解析 usage；超过 4MB 改为从末尾 64KB 窗口正则提取 usage，
@@ -473,7 +639,7 @@ function sseWrite(res, event, data) {
 }
 
 // OpenAI SSE 流 → Anthropic SSE 流（状态机：thinking 块 → text 块 → tool_use 块）
-async function pipeAnthropicStream(res, upBody, model, thinkingRequested, bytesIn = 0) {
+async function pipeAnthropicStream(res, upBody, model, thinkingRequested, bytesIn = 0, tFetch = null) {
   const t0 = Date.now();
   const msgId = `msg_${randHex()}`;
   let messageStarted = false;
@@ -481,6 +647,10 @@ async function pipeAnthropicStream(res, upBody, model, thinkingRequested, bytesI
   let openBlock = null; // { type, index }
   let usage = null;
   let finishReason = null;
+  const marks = [];
+  const streamPerf = () => (
+    tFetch == null || !marks.length ? null : observeStream(tFetch, marks, usage?.completion_tokens ?? 0, performance.now())
+  );
 
   const startMessage = (inputTokens = 0) => {
     if (messageStarted) return;
@@ -522,6 +692,8 @@ async function pipeAnthropicStream(res, upBody, model, thinkingRequested, bytesI
     const choice = Array.isArray(c?.choices) ? c.choices[0] : null;
     if (!choice) return;
     const d = choice.delta ?? {};
+    const w = outputWeight(c);
+    if (w > 0) marks.push({ at: performance.now(), w });
     startMessage(usage?.prompt_tokens ?? 0);
     if (d.reasoning_content && thinkingRequested) {
       const idx = ensureBlock('thinking', { type: 'thinking', thinking: '' });
@@ -578,7 +750,7 @@ async function pipeAnthropicStream(res, upBody, model, thinkingRequested, bytesI
     }
   } catch (e) {
     log(`Anthropic 流中断: ${e.message}`);
-    recordStats({ model, status: 499, ms: Date.now() - t0, bytesIn, tout: usage?.completion_tokens ?? 0, tin: usage?.prompt_tokens ?? 0 });
+    recordStats({ model, status: 499, ms: Date.now() - t0, bytesIn, tout: usage?.completion_tokens ?? 0, tin: usage?.prompt_tokens ?? 0, perf: streamPerf() });
     try {
       startMessage();
       closeBlock();
@@ -598,7 +770,7 @@ async function pipeAnthropicStream(res, upBody, model, thinkingRequested, bytesI
     });
     sseWrite(res, 'message_stop', { type: 'message_stop' });
   } finally {
-    recordStats({ model, status: 200, ms: Date.now() - t0, bytesIn, tin: usage?.prompt_tokens ?? 0, tout: usage?.completion_tokens ?? 0 });
+    recordStats({ model, status: 200, ms: Date.now() - t0, bytesIn, tin: usage?.prompt_tokens ?? 0, tout: usage?.completion_tokens ?? 0, perf: streamPerf() });
     res.end();
   }
 }
@@ -634,7 +806,7 @@ async function handleAnthropic(req, res, bodyBuf) {
   }
 
   if (payload.stream) {
-    await pipeAnthropicStream(res, up.body, payload.model, thinkingRequested, bodyBuf.length);
+    await pipeAnthropicStream(res, up.body, payload.model, thinkingRequested, bodyBuf.length, fetchStart.get(up) ?? null);
   } else {
     const json = await up.json();
     const msg = openaiToAnthropicMessage(json, payload.model, thinkingRequested);
@@ -666,9 +838,164 @@ const LAUNCH_LABEL = 'cn.hicann.cannbot-gateway-proxy';
 const LAUNCH_TARGET = `gui/${os.userInfo().uid}/${LAUNCH_LABEL}`;
 
 // ---- 流量统计（内存累计 + 30s 防抖落盘 stats.json） ----------------------
+//
+// 模型性能口径对齐 vLLM benchmark_serving / MLPerf，并补上「首包里不止 1 个 token」：
+//   TTFT  发出上游请求 → 首个输出块到达（预填 + 排队 + 网络，不含本地换 VK）
+//   E2E   发出上游请求 → 流结束
+//   解码段 首个输出块 → 最后一个输出块（不含末尾 usage / [DONE]）
+//   首包 token  把上游 completion_tokens 按字符权重摊到各块；同一时刻的块先合并
+//   TPOT  解码段 / (输出 token − 首包 token)。逐 token 流式时首包 = 1，即 vLLM 的 (n−1)
+//   ITL   相邻输出块的间隔 / 该块摊到的 token 数，每个 token 记一次
+//   解码速度  Σ(输出 token − 首包 token) / Σ解码段，按 token 加权
+// 延迟分布用直方图，跨天相加即可，不保存每次请求的原始样本。
 
 const STATS_FILE = path.join(SCRIPT_DIR, 'stats.json');
+const LAT_EDGES = Object.freeze([1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 10000, 30000]);
 const emptyBucket = () => ({ req: 0, err: 0, tin: 0, tout: 0, bin: 0, bout: 0, ms: 0 });
+
+function emptyHist(withSamples = false) {
+  const h = { n: 0, sum: 0, b: Array(LAT_EDGES.length + 1).fill(0) };
+  if (withSamples) h.s = [];
+  return h;
+}
+function emptyPerf() {
+  return { ttft: emptyHist(true), tpot: emptyHist(true), itl: emptyHist(false), e2e: emptyHist(true), dtok: 0, dms: 0, dn: 0 };
+}
+
+const SAMPLE_CAP = 2000;
+
+function histAdd(h, ms, w = 1) {
+  if (!(ms >= 0) || !(w > 0) || !Number.isFinite(ms)) return;
+  let i = 0;
+  while (i < LAT_EDGES.length && ms > LAT_EDGES[i]) i++;
+  h.b[i] += w;
+  h.n += w;
+  h.sum += ms * w;
+  // TTFT / TPOT / E2E 每个请求一个样本，留原始值，分位数不必靠粗分桶插值
+  if (Array.isArray(h.s) && w === 1) {
+    if (h.s.length < SAMPLE_CAP) h.s.push(Math.round(ms * 100) / 100);
+    else delete h.s;
+  }
+}
+
+function mergeHist(dst, src) {
+  if (!src?.n || !Array.isArray(src.b) || src.b.length !== dst.b.length) return;
+  const dstOk = Array.isArray(dst.s) && dst.s.length === dst.n;
+  const srcOk = Array.isArray(src.s) && src.s.length === src.n;
+  dst.n += src.n;
+  dst.sum += src.sum || 0;
+  for (let i = 0; i < dst.b.length; i++) dst.b[i] += src.b[i] || 0;
+  if (dstOk && srcOk && dst.s.length + src.s.length <= SAMPLE_CAP) dst.s = dst.s.concat(src.s);
+  else if (Array.isArray(dst.s)) delete dst.s;
+}
+
+function ensurePerf(b) {
+  if (!b.perf) b.perf = emptyPerf();
+  for (const k of ['ttft', 'tpot', 'itl', 'e2e']) {
+    const h = b.perf[k];
+    if (!h || !Array.isArray(h.b) || h.b.length !== LAT_EDGES.length + 1) b.perf[k] = emptyHist(k !== 'itl');
+    else if (k !== 'itl' && h.n === 0 && !Array.isArray(h.s)) h.s = [];
+  }
+  b.perf.dtok = b.perf.dtok || 0;
+  b.perf.dms = b.perf.dms || 0;
+  b.perf.dn = b.perf.dn || 0;
+  return b.perf;
+}
+
+// 短 <1000、中 1000–3999、长 ≥4000。没有 prompt token 数的请求不进档。
+function inputBand(tin) {
+  if (!(tin >= 1)) return null;
+  if (tin < 1000) return 's';
+  if (tin < 4000) return 'm';
+  return 'l';
+}
+
+function mergePerf(dst, src) {
+  if (!src) return;
+  for (const k of ['ttft', 'tpot', 'itl', 'e2e']) mergeHist(dst[k], src[k]);
+  dst.dtok += src.dtok || 0;
+  dst.dms += src.dms || 0;
+  dst.dn += src.dn || 0;
+  if (!src.bands) return;
+  dst.bands ??= {};
+  for (const id of ['s', 'm', 'l']) {
+    if (!src.bands[id]) continue;
+    if (!dst.bands[id]) dst.bands[id] = emptyPerf();
+    mergePerf(dst.bands[id], src.bands[id]);
+  }
+}
+
+// 同一条样本既计入总分布，也计入对应输入档。档内对象不再嵌套 bands。
+function withBand(perf, tin) {
+  const id = inputBand(tin);
+  if (!id || !(perf?.ttft?.n)) return perf;
+  const slice = emptyPerf();
+  mergePerf(slice, perf);
+  return { ...perf, bands: { [id]: slice } };
+}
+
+function coalesceMarks(marks) {
+  const out = [];
+  for (const m of marks) {
+    if (!(m.w > 0)) continue;
+    const prev = out[out.length - 1];
+    // 同一毫秒内的块是同一次到达，拆开会记出接近 0 的假 ITL
+    if (prev && m.at - prev.at < 1) prev.w += m.w;
+    else out.push({ at: m.at, w: m.w });
+  }
+  return out;
+}
+
+// 最大余数法，使各块 token 之和等于上游 completion_tokens。首块至少 1。
+function apportionTokens(weights, tout) {
+  const n = weights.length;
+  const tokens = Array(n).fill(0);
+  if (n === 0 || !(tout >= 1)) return tokens;
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) { tokens[0] = tout; return tokens; }
+  const raw = weights.map((w) => tout * w / total);
+  for (let i = 0; i < n; i++) tokens[i] = Math.floor(raw[i]);
+  let remain = tout - tokens.reduce((a, b) => a + b, 0);
+  const order = raw.map((x, i) => [i, x - Math.floor(x)]).sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  for (let k = 0; k < remain; k++) tokens[order[k][0]]++;
+  if (tokens[0] < 1) {
+    let donor = -1;
+    for (let i = 1; i < n; i++) if (tokens[i] > 0 && (donor < 0 || tokens[i] > tokens[donor])) donor = i;
+    if (donor > 0) { tokens[donor]--; tokens[0] = 1; }
+    else tokens[0] = tout;
+  }
+  return tokens;
+}
+
+// marks: { at, w }[]，时间用 performance.now()，与 tFetch / tEnd 同一时钟。
+function observeStream(tFetch, marks, tout, tEnd) {
+  const perf = emptyPerf();
+  const merged = coalesceMarks(marks);
+  if (!merged.length || !(tFetch >= 0) || !(tEnd >= tFetch)) return perf;
+  const tFirst = merged[0].at;
+  const tLast = merged[merged.length - 1].at;
+  const ttft = tFirst - tFetch;
+  const e2e = tEnd - tFetch;
+  if (ttft < 0 || e2e < 0) return perf;
+  histAdd(perf.ttft, ttft);
+  histAdd(perf.e2e, e2e);
+  const tokens = tout >= 1 ? apportionTokens(merged.map((m) => m.w), tout) : [];
+  const firstTok = tokens[0] || 0;
+  const decodeTok = tout - firstTok;
+  const dms = tLast - tFirst;
+  if (decodeTok > 0 && dms > 0) {
+    histAdd(perf.tpot, dms / decodeTok);
+    perf.dtok += decodeTok;
+    perf.dms += dms;
+    perf.dn += 1;
+  }
+  for (let i = 1; i < merged.length; i++) {
+    const gap = merged[i].at - merged[i - 1].at;
+    const n = tokens[i] || 0;
+    if (n > 0 && gap >= 0) histAdd(perf.itl, gap / n, n);
+  }
+  return perf;
+}
 
 let stats = (() => {
   try {
@@ -695,7 +1022,7 @@ const dayKey = (d = new Date()) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
-function recordStats({ model = '-', status = 0, ms = 0, bytesIn = 0, bytesOut = 0, tin = 0, tout = 0 }) {
+function recordStats({ model = '-', status = 0, ms = 0, bytesIn = 0, bytesOut = 0, tin = 0, tout = 0, perf = null }) {
   const now = new Date();
   const day = (stats.days[dayKey(now)] ??= { total: emptyBucket(), models: {}, hours: Array.from({ length: 24 }, () => ({ req: 0, tin: 0, tout: 0 })) });
   const bad = status >= 400;
@@ -703,10 +1030,23 @@ function recordStats({ model = '-', status = 0, ms = 0, bytesIn = 0, bytesOut = 
     b.req++;
     if (bad) b.err++;
     b.tin += tin; b.tout += tout; b.bin += bytesIn; b.bout += bytesOut; b.ms += ms;
+    if (perf?.ttft?.n) mergePerf(ensurePerf(b), withBand(perf, tin));
   }
   const hb = day.hours[now.getHours()];
   hb.req++; hb.tin += tin; hb.tout += tout;
   statsDirty = true;
+  if (perf?.ttft?.n) {
+    const ttft = perf.ttft.sum / perf.ttft.n;
+    const band = inputBand(tin);
+    const parts = [`perf ${model}`, band ? `in=${band}` : 'in=-', `ttft=${Math.round(ttft)}ms`];
+    if (perf.dn && perf.dms > 0) {
+      const tps = perf.dtok / (perf.dms / 1000);
+      parts.push(`tpot=${(perf.tpot.sum / perf.tpot.n).toFixed(1)}ms`, `${tps >= 100 ? Math.round(tps) : tps.toFixed(1)} tok/s`);
+    }
+    if (perf.itl?.n) parts.push(`itl=${(perf.itl.sum / perf.itl.n).toFixed(1)}ms`);
+    if (perf.e2e?.n) parts.push(`e2e=${Math.round(perf.e2e.sum / perf.e2e.n)}ms`);
+    log(parts.join(' '));
+  }
 }
 
 function summarizeStats(keys) {
@@ -717,6 +1057,7 @@ function summarizeStats(keys) {
     sum.req += d.total.req; sum.err += d.total.err;
     sum.tin += d.total.tin; sum.tout += d.total.tout;
     sum.bin += d.total.bin; sum.bout += d.total.bout; sum.ms += d.total.ms;
+    if (d.total.perf) mergePerf(ensurePerf(sum), d.total.perf);
   }
   return sum;
 }
@@ -751,7 +1092,9 @@ const server = http.createServer(async (req, res) => {
         protocols: ['openai (passthrough)', 'anthropic messages (translated)'],
         jwt: jwtInfo,
         vkCached: Boolean(personalCache?.vk),
-        vkCachedAt: personalCache?.vk ? new Date(personalCache.at).toISOString() : null,
+        vkCachedAt: personalCache?.vk ? new Date(personalCache.vkAt).toISOString() : null,
+        vkSource: personalCache?.vkSource ?? null,
+        vkQuota: personalCache?.vkQuota ?? null,
         modelsKnown: personalCache?.models ? personalCache.models.length : null,
         uptimeSec: Math.round(process.uptime()),
       });
@@ -806,6 +1149,7 @@ const server = http.createServer(async (req, res) => {
         hours: today.hours,
         days,
         since: weekKeys[0] ?? null,
+        latEdges: LAT_EDGES,
       });
     }
 
